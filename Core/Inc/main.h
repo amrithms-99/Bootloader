@@ -28,10 +28,6 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f7xx_hal.h"
-#include "App_Header.h"
-#define E_OK 0
-#define E_NOT_OK 1
-#define MAGIC_NUM 100
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */

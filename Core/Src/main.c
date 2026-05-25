@@ -19,10 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
-#define APP_ADDR 0x8010400
-#define APP_HEADER_ADDR Ox8010000
-typedef void (*pFunction)(void);
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -45,6 +41,10 @@ typedef void (*pFunction)(void);
 
 /* Private variables ---------------------------------------------------------*/
 
+CRC_HandleTypeDef hcrc;
+
+UART_HandleTypeDef huart3;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -53,6 +53,8 @@ typedef void (*pFunction)(void);
 void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_CRC_Init(void);
+static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -94,6 +96,8 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_CRC_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -101,77 +105,92 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-
-
-
-  int Application_is_Valid(void)
-  {
-	  const app_header_t *app_hdr = (const app_header_t *)APP_HEADER_ADDR;
-	  uint32_t reset_handler = *(uint32_t*)(APP_ADDR + 4);
-	  if((app_hdr->magic_num != MAGIC_NUM) &&(reset_handler & 0xFF00000 == 0x8000000) )
-	  {
-		  return E_NOT_OK;
-
-	  }
-
-
-
-
-	  else
-	  {
-		  return E_OK;
-
-	  }
-
-
-
-
-
-
-
-  }
-
   while (1)
   {
-    /* USER CODE END WHILE */
-	  //one led should
+	  /* USER CODE END WHILE */
+	  	  //one led should
 
-	 HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-	 HAL_Delay(5000);
-	 HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-	 uint8_t ret_val = Application_is_Valid();
-	 if(ret_val == E_OK)
-		 JumpToApplication(APP_ADDR);
+	  	 HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
+	  	 HAL_Delay(5000);
+	  	 HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+	  	 uint8_t ret_val = ApplicationImage_Check();
+	  	 if(ret_val == 1)
+	  	 {
+	  		 // magic num check
+	  		 HAL_UART_Transmit(huart, (uint8_t*)"Magic Num check failed", 30, 100);
+
+	  	 }
+	  	 if(ret_val ==2 )
+	  	 {
+	  		 // crc check failed
+	  		HAL_UART_Transmit(huart, (uint8_t*)"CRC check failed", 30, 100);
+	  	 }
+	  	 else
+	  	 {
+	  		HAL_UART_Transmit(huart, (uint8_t*)"Application firmware valid", 40, 100);
+	  		JumpToApplication(APP_ADDR);
+	  	 }
+
+  }
+    /* USER CODE END WHILE */
+
+
 
     /* USER CODE BEGIN 3 */
-  }
+
+
   /* USER CODE END 3 */
 }
+
+void JumpToApplication(uint32_t addr)
+  {
+
+  	uint32_t JumpAddress = *(uint32_t*)(addr + 0x04);
+
+
+
+  	pFunction Jump = (pFunction) JumpAddress;
+  	HAL_RCC_DeInit();
+  	HAL_DeInit();
+  	SysTick->CTRL = 0;
+  	SysTick->LOAD = 0;
+  	SysTick->VAL = 0;
+
+  	 SCB->VTOR = addr;
+  	__set_MSP(*(uint32_t *) addr);
+  	Jump();
+
+  }
+
+uint8_t ApplicationImage_Check(void)
+  {
+	  const app_header_t *app_hdr = (const app_header_t *)APP_HEADER_ADDR;
+	  uint32_t flash_size = app_header_t->size;
+	  uint32_t reset_handler = *(uint32_t*)(APP_ADDR + 4);
+	  static const crc32_val = HAL_CRC_Calculate(hcrc,(uint32_t*)addr, flash_size/4);
+
+	  if((app_hdr->magic_num != MAGIC_NUM) &&(reset_handler & 0xFF00000 != 0x8000000) )
+	  {
+		  return 1;
+
+	  }
+	  if(crc32_val != flash_size)
+	  {
+		  return 2;
+	  }
+
+
+	   else
+	  {
+		  return 0;
+
+	  }
+
 
 /**
   * @brief System Clock Configuration
   * @retval None
   */
-
-void JumpToApplication(uint32_t addr)
-{
-
-	uint32_t JumpAddress = *(uint32_t*)(addr + 0x04);
-
-
-
-	pFunction Jump = (pFunction) JumpAddress;
-	HAL_RCC_DeInit();
-	HAL_DeInit();
-	SysTick->CTRL = 0;
-	SysTick->LOAD = 0;
-	SysTick->VAL = 0;
-
-	 SCB->VTOR = addr;
-	__set_MSP(*(uint32_t *) addr);
-	Jump();
-
-}
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -207,6 +226,72 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief CRC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CRC_Init(void)
+{
+
+  /* USER CODE BEGIN CRC_Init 0 */
+
+  /* USER CODE END CRC_Init 0 */
+
+  /* USER CODE BEGIN CRC_Init 1 */
+
+  /* USER CODE END CRC_Init 1 */
+  hcrc.Instance = CRC;
+  hcrc.Init.DefaultPolynomialUse = DEFAULT_POLYNOMIAL_ENABLE;
+  hcrc.Init.DefaultInitValueUse = DEFAULT_INIT_VALUE_ENABLE;
+  hcrc.Init.InputDataInversionMode = CRC_INPUTDATA_INVERSION_NONE;
+  hcrc.Init.OutputDataInversionMode = CRC_OUTPUTDATA_INVERSION_DISABLE;
+  hcrc.InputDataFormat = CRC_INPUTDATA_FORMAT_BYTES;
+  if (HAL_CRC_Init(&hcrc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CRC_Init 2 */
+
+  /* USER CODE END CRC_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
 }
 
 /**
