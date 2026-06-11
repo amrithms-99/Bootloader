@@ -42,9 +42,13 @@
 /* Private variables ---------------------------------------------------------*/
 
 CRC_HandleTypeDef hcrc;
+#define HEADER_SIZE
 
 UART_HandleTypeDef huart3;
-
+#define APP_HEADER_ADDR 0x8010000
+#define APP_ADDRESS 0x8018000
+#define CHUNK_SIZE 256
+#define MAGIC_NUM 0xFF
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -55,6 +59,14 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_CRC_Init(void);
 static void MX_USART3_UART_Init(void);
+uint8_t Header_Buffer[16];
+bool Header_Received = false;
+uint8_t RX_Buffer[CHUNK_SIZE];
+static bool validFirmwareImage = false;
+static uint32_t Num_of_Bytes;
+app_header_t App_Header;
+
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -131,7 +143,12 @@ int main(void)
 	  		JumpToApplication(APP_ADDR);
 	  	 }
 
-  }
+	  	 if(OTA_Flag == 1)
+	  	 {
+	  		HAL_UART_Receive_IT(&huart3, Header_Buffer, HEADER_SIZE);
+
+
+	  	 }
     /* USER CODE END WHILE */
 
 
@@ -142,12 +159,90 @@ int main(void)
   /* USER CODE END 3 */
 }
 
+void OTA_Flag_Check()
+{
+	// read OTA flag
+	uint32_t OTA_Flag = *(uint32_t *)(APP_HEADER_ADDR + 12);
+
+
+
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+
+
+	if(huart->Instance == USART3)
+	    {
+	        if(Header_Received == false)
+	        {
+
+	            memcpy(&app_header,
+	                   HeaderBuffer,
+	                   sizeof(app_header_t));
+
+	            Header_Received = true;
+
+	            // Validate header
+	            if(app_header.magic_num == MAGIC_NUM)
+	            {
+	            	// start receiving firmware chunks
+	            	validFirmwareImage = true;
+	            	Header_Received = true ;
+	            	HAL_UART_Receive_IT(&huart3,RX_Buffer,CHUNK_SIZE);
+	            	//HAL_UART_Receive_IT(&huart3,RX_Buffer,CHUNK_SIZE);
+	            }
+	            else
+	            {
+	            	//do not flash as firmware is corrupt
+	            	Header_Received = false;
+	            	validFirmwareImage = false;
+	            }
+
+	        }
+
+	        else
+	        {
+	        	// header is recieved . Start recieving the new firmware chunks
+	        	if(validFirmwareImage == true)
+	        	{
+	        		Flash_Write_Data();
+	        		HAL_UART_Receive_IT(&huart3,RX_Buffer,CHUNK_SIZE);
+
+	        	}
+	        }
+	    }
+	}
+
+}
+
+uint8_t Flash_Write_Data()
+{
+	// unlock the flash memory
+
+	FLASH_EraseInitTypeDef erase_init_parm;
+	static uint32_t *sector_error;
+	app_header_t app_header;
+	erase_init_parm.Sector = FLASH_SECTOR_3;
+	erase_init_parm.TypeErase = FLASH_TYPEERASE_SECTORS;
+	erase_init_parm.VoltageRange= FLASH_VOLTAGE_RANGE_3;
+	erase_init_parm.NbSectors = 2; // how many sector to erase
+	HAL_FLASH_Unlock();
+	// erase Sector 3 and 4
+	if(HAL_FLASHEx_Erase(&erase_init_parm, &sector_error) != HAL_OK)
+	{
+		return HAL_FLASH_GetError();
+
+	}
+
+
+}
+
+
 void JumpToApplication(uint32_t addr)
   {
 
   	uint32_t JumpAddress = *(uint32_t*)(addr + 0x04);
-
-
 
   	pFunction Jump = (pFunction) JumpAddress;
   	HAL_RCC_DeInit();
