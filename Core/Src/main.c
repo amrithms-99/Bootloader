@@ -55,6 +55,7 @@ UART_HandleTypeDef huart3;
 #define MAGIC_NUM 0xFF
 #define E_OK 0
 #define E_NOT_OK 1
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -65,23 +66,29 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_CRC_Init(void);
 static void MX_USART3_UART_Init(void);
-static uint8_t ApplicationImage_Check();
-static uint8_t Bootloader_HeaderCheck();
-static uint8_t Flash_Erase_Data();
-static uint8_t Flash_Write_Data();
-static uint8_t Bootloader_CrcCheck();
-uint8_t Header_Buffer[16];
+/* Bootloader_HeaderCheck removed: OTA_Process_UART handles header parsing */
+static uint8_t Flash_Erase_Data(void);
+static uint8_t Flash_Write_Data(void);
+static uint8_t Bootloader_CrcCheck(void);
+static void OTA_Process_UART(void);
+void OTA_Flag_Check(void);
+
+/* Globals */
+uint8_t Header_Buffer[HEADER_SIZE];
 bool Header_Received = false;
 uint8_t RX_Buffer[CHUNK_SIZE];
 static bool ValidFirmwareImage = false;
 app_header_t App_Header;
-uint32_t RemainingBytes;
-uint32_t CurrentChunkSize;
+uint32_t RemainingBytes = 0;
+uint32_t CurrentChunkSize = 0;
 static uint32_t CurrentFlashAddress = APP_ADDRESS;
-static uint32_t OTA_Flag;
+static uint32_t OTA_Flag = 0;
 typedef void (*pFunction)(void);
 
-
+/* Parsed header fields (from UART header appended to image) */
+static uint32_t ReceivedImageSize = 0;
+static uint32_t ReceivedImageCrc = 0;
+static uint32_t ReceivedImageMagic = 0;
 
 /* USER CODE BEGIN PFP */
 
@@ -98,7 +105,6 @@ typedef void (*pFunction)(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -107,212 +113,175 @@ int main(void)
   MPU_Config();
 
   /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_CRC_Init();
   MX_USART3_UART_Init();
-  /* USER CODE BEGIN 2 */
-
-  /* USER CODE END 2 */
 
   /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-
   while (1)
   {
-	  /* USER CODE END WHILE */
-	  	  //one led should
+    // led blinking to indicate bootloader is running
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
+    HAL_Delay(5000);
 
-	  	 HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-	  	 HAL_Delay(5000);
-	  	 HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-	  	 OTA_Flag_Check();
+    OTA_Flag_Check();
 
-	  	 if(OTA_Flag == 1)
-	  	 {
-	  		 if(Header_Received == false)
-	  		 {
+    if (OTA_Flag == 1)
+    {
+      OTA_Process_UART();
+    }
+    else
+    {
+      // Jump to Application
+      JumpToApplication(APP_ADDRESS);
+    }
+  }
+}
 
+/* Read OTA flag from header area in flash. */
+void OTA_Flag_Check(void)
+{
+  /* Read the OTA flag from the application header*/
+  uint8_t *otaFlag = (uint8_t *)APP_HEADER_ADDR;
+  //copy the OTA flag value to the global variable
+  OTA_Flag = (*(uint32_t *)otaFlag);
+}
 
-	  		//start reading Header
-				HAL_UART_Receive(&huart, Header_Buffer, 16, 1000);
-				Bootloader_HeaderCheck();
-	  		 }
+/* Handle UART reception: header first, then chunks, write to flash and verify CRC.
+Roll back not yet implemeted  */
+static void OTA_Process_UART(void)
+{
+  /* If header not yet received, read the header over UART */
+  if (Header_Received == false)
+  {
+    if (HAL_UART_Receive(&huart3, Header_Buffer, HEADER_SIZE, 5000) == HAL_OK)
+    {
+      uint32_t *ph = (uint32_t *)Header_Buffer;
+      ReceivedImageMagic = ph[0];
+      ReceivedImageSize = ph[1];
+      ReceivedImageCrc = ph[2];
 
-			if(ValidFirmwareImage == true)
-			 {
-				 //start reception of firmware chunks
-
-				if(RemainingBytes > CHUNK_SIZE)
-				{
-					CurrentChunkSize = CHUNK_SIZE;
-				}
-				else
-				{
-					CurrentChunkSize= RemainingBytes;
-				}
-				if(RemainingBytes !=0)
-				{
-					HAL_UART_Receive(&huart3, RX_Buffer, CurrentChunkSize, 1000);
-					RemainingBytes = RemainingBytes - CurrentChunkSize;
-					Flash_Write_Data();
-				}
-
-				if(Bootloader_CrcCheck() == 1)
-				{
-					// start jump to application
-					// reset OTA flag
-					HAL_UART_Transmit(&huart3, (uint8_t*)"Application firmware valid", 40, 100);
-					JumpToApplication(APP_ADDRESS);
-
-				 }
-				 else
-				 {
-					 // stay in bootloader
-				 }
-
-			 }
-			 else
-			 {
-				 // firmware not valid
-				 Header_Received = false;
-			 }
-
-
-	  	 }
-	  	 else
-	  	 {
-	  		 //Jump to Application
-	  		 JumpToApplication(APP_ADDRESS);
-	  	 }
-
+      /* Basic integrity check */
+      if ((ReceivedImageSize > 0) && (ReceivedImageSize < 0x01000000))
+      {
+        Header_Received = true;
+        ValidFirmwareImage = true;
+        RemainingBytes = ReceivedImageSize;
+        CurrentFlashAddress = APP_ADDRESS;
+        Flash_Erase_Data();
+      }
+      else
+      {
+        Header_Received = false;
+        ValidFirmwareImage = false;
+        return;
+      }
+    }
+    else
+    {
+      /* failed to receive header */
+      return;
+    }
   }
 
-    /* USER CODE END WHILE */
+  /* If we have a valid image, receive chunks and write to flash */
+  if (ValidFirmwareImage)
+  {
+    while (RemainingBytes != 0)
+    {
+      CurrentChunkSize = (RemainingBytes > CHUNK_SIZE) ? CHUNK_SIZE : RemainingBytes;
 
+      if (HAL_UART_Receive(&huart3, RX_Buffer, CurrentChunkSize, 2000) == HAL_OK)
+      {
+        RemainingBytes -= CurrentChunkSize;
+        Flash_Write_Data();
+      }
+      else
+      {
+        /* receive error - abort */
+        Header_Received = false;
+        ValidFirmwareImage = false;
+        return;
+      }
+    }
 
-
-    /* USER CODE BEGIN 3 */
-
-
-  /* USER CODE END 3 */
+    /* verify CRC */
+    if (Bootloader_CrcCheck() == 1)
+    {
+      HAL_UART_Transmit(&huart3, (uint8_t *)"Application firmware valid", 24, 100);
+      /* Do not clear OTA flag here; application will confirm and clear it. */
+      JumpToApplication(APP_ADDRESS);
+    }
+    else
+    {
+      /* CRC failed */
+      Header_Received = false;
+      ValidFirmwareImage = false;
+    }
+  }
 }
 
-void OTA_Flag_Check()
+static uint8_t Flash_Erase_Data(void)
 {
-	// read OTA flag
-	OTA_Flag = *(uint32_t *)(APP_HEADER_ADDR + 12);
+  FLASH_EraseInitTypeDef erase_init_parm;
+  static uint32_t sector_error;
 
+  erase_init_parm.Sector = FLASH_SECTOR_3;
+  erase_init_parm.TypeErase = FLASH_TYPEERASE_SECTORS;
+  erase_init_parm.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+  erase_init_parm.NbSectors = 2; // how many sectors to erase
+  HAL_FLASH_Unlock();
+  if (HAL_FLASHEx_Erase(&erase_init_parm, &sector_error) != HAL_OK)
+  {
+    return HAL_FLASH_GetError();
+  }
+  return 1;
 }
 
-static uint8_t Flash_Erase_Data()
+static uint8_t Flash_Write_Data(void)
 {
-	FLASH_EraseInitTypeDef erase_init_parm;
-		static uint32_t sector_error;
-		app_header_t app_header;
-		erase_init_parm.Sector = FLASH_SECTOR_3;
-		erase_init_parm.TypeErase = FLASH_TYPEERASE_SECTORS;
-		erase_init_parm.VoltageRange= FLASH_VOLTAGE_RANGE_3;
-		erase_init_parm.NbSectors = 2; // how many sector to erase
-		HAL_FLASH_Unlock();
-		// erase Sector 3 and 4
-		if(HAL_FLASHEx_Erase(&erase_init_parm, &sector_error) != HAL_OK)
-		{
-			return HAL_FLASH_GetError();
-
-		}
-		return 1;
+  for (uint32_t i = 0; i < CurrentChunkSize; i++)
+  {
+    HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, CurrentFlashAddress++, RX_Buffer[i]);
+  }
+  return 1;
 }
-
-static uint8_t Flash_Write_Data()
-{
-
-	for(uint32_t i = 0; i < CurrentChunkSize; i++)
-	{
-	    HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE,CurrentFlashAddress++,RX_Buffer[i]);
-
-	}
-	return 1;
-
-
-}
-
 
 void JumpToApplication(uint32_t addr)
-  {
-
-  	uint32_t JumpAddress = *(uint32_t*)(addr + 0x04);
-
-  	pFunction Jump = (pFunction) JumpAddress;
-  	HAL_RCC_DeInit();
-  	HAL_DeInit();
-  	SysTick->CTRL = 0;
-  	SysTick->LOAD = 0;
-  	SysTick->VAL = 0;
-
-  	 SCB->VTOR = addr;
-  	__set_MSP(*(uint32_t *) addr);
-  	Jump();
-
-  }
-uint8_t Bootloader_HeaderCheck()
 {
-	memcpy(&App_Header, Header_Buffer,sizeof(app_header_t));
-	if(App_Header.magic_num == MAGIC_NUM)
-	{
-		// correct firmware header received
+  uint32_t JumpAddress = *(uint32_t *)(addr + 0x04);
+  pFunction Jump = (pFunction)JumpAddress;
 
-		Header_Received= true;
-		ValidFirmwareImage = true;
-		RemainingBytes = App_Header.size;
-		// erase flash memory once
-		Flash_Erase_Data();
-		return 0;
+  HAL_RCC_DeInit();
+  HAL_DeInit();
+  SysTick->CTRL = 0;
+  SysTick->LOAD = 0;
+  SysTick->VAL = 0;
 
-	}
-	else
-	{
-		ValidFirmwareImage = false;
-		Header_Received = false;
-		return 1;
-	}
-
-
+  SCB->VTOR = addr;
+  __set_MSP(*(uint32_t *)addr);
+  Jump();
 }
 
-uint8_t static Bootloader_CrcCheck()
+/* Bootloader_HeaderCheck removed - header parsing moved to OTA_Process_UART() */
+
+uint8_t Bootloader_CrcCheck(void)
 {
-	uint32_t flashSize;
-	uint32_t addr = APP_ADDRESS + 16;
+  if (ReceivedImageSize == 0)
+    return 0;
 
-	  static const uint32_t crc32_val = HAL_CRC_Calculate(hcrc,(uint32_t*)addr, flash_size/4);
-	  if(crc32_val == App_Header.crc)
-	  {
-		  // crc passed
-		  return 1;
-	  }
-	  else
-	  {
-		  return 0;
-	  }
+  uint32_t addr = APP_ADDRESS;
+  uint32_t wordCount = (ReceivedImageSize + 3) / 4;
+  uint32_t crc32_val = HAL_CRC_Calculate(&hcrc, (uint32_t *)addr, wordCount);
+  return (crc32_val == ReceivedImageCrc) ? 1 : 0;
+}
 
-
-  }
 /**
   * @brief System Clock Configuration
   * @retval None
@@ -322,14 +291,9 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -339,10 +303,8 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -361,28 +323,16 @@ void SystemClock_Config(void)
   */
 static void MX_CRC_Init(void)
 {
-
-  /* USER CODE BEGIN CRC_Init 0 */
-
-  /* USER CODE END CRC_Init 0 */
-
-  /* USER CODE BEGIN CRC_Init 1 */
-
-  /* USER CODE END CRC_Init 1 */
   hcrc.Instance = CRC;
   hcrc.Init.DefaultPolynomialUse = DEFAULT_POLYNOMIAL_ENABLE;
   hcrc.Init.DefaultInitValueUse = DEFAULT_INIT_VALUE_ENABLE;
   hcrc.Init.InputDataInversionMode = CRC_INPUTDATA_INVERSION_NONE;
   hcrc.Init.OutputDataInversionMode = CRC_OUTPUTDATA_INVERSION_DISABLE;
-  hcrc.InputDataFormat = CRC_INPUTDATA_FORMAT_BYTES;
+  hcrc.InputDataFormat = CRC_INPUTDATA_FORMAT_WORDS;
   if (HAL_CRC_Init(&hcrc) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN CRC_Init 2 */
-
-  /* USER CODE END CRC_Init 2 */
-
 }
 
 /**
@@ -392,14 +342,6 @@ static void MX_CRC_Init(void)
   */
 static void MX_USART3_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART3_Init 0 */
-
-  /* USER CODE END USART3_Init 0 */
-
-  /* USER CODE BEGIN USART3_Init 1 */
-
-  /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
   huart3.Init.BaudRate = 115200;
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
@@ -414,10 +356,6 @@ static void MX_USART3_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART3_Init 2 */
-
-  /* USER CODE END USART3_Init 2 */
-
 }
 
 /**
@@ -428,43 +366,25 @@ static void MX_USART3_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
-  /* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PB14 */
   GPIO_InitStruct.Pin = GPIO_PIN_14;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
- /* MPU Configuration */
-
+/* MPU Configuration */
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
 
-  /* Disables the MPU */
   HAL_MPU_Disable();
 
-  /** Initializes and configures the Region and the memory to be protected
-  */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -478,9 +398,7 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
-  /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
-
 }
 
 /**
@@ -489,27 +407,14 @@ void MPU_Config(void)
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
