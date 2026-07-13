@@ -22,6 +22,7 @@
 #include "stdbool.h"
 #include "string.h"
 #include "App_Header.h"
+#include "Bootloder.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -46,15 +47,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 CRC_HandleTypeDef hcrc;
-#define HEADER_SIZE 16
-
 UART_HandleTypeDef huart3;
-#define APP_HEADER_ADDR 0x8010000
-#define APP_ADDRESS 0x8018000
-#define CHUNK_SIZE 256
-#define MAGIC_NUM 0xFF
-#define E_OK 0
-#define E_NOT_OK 1
 
 /* USER CODE BEGIN PV */
 
@@ -66,29 +59,6 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_CRC_Init(void);
 static void MX_USART3_UART_Init(void);
-/* Bootloader_HeaderCheck removed: OTA_Process_UART handles header parsing */
-static uint8_t Flash_Erase_Data(void);
-static uint8_t Flash_Write_Data(void);
-static uint8_t Bootloader_CrcCheck(void);
-static void OTA_Process_UART(void);
-void OTA_Flag_Check(void);
-
-/* Globals */
-uint8_t Header_Buffer[HEADER_SIZE];
-bool Header_Received = false;
-uint8_t RX_Buffer[CHUNK_SIZE];
-static bool ValidFirmwareImage = false;
-app_header_t App_Header;
-uint32_t RemainingBytes = 0;
-uint32_t CurrentChunkSize = 0;
-static uint32_t CurrentFlashAddress = APP_ADDRESS;
-static uint32_t OTA_Flag = 0;
-typedef void (*pFunction)(void);
-
-/* Parsed header fields (from UART header appended to image) */
-static uint32_t ReceivedImageSize = 0;
-static uint32_t ReceivedImageCrc = 0;
-static uint32_t ReceivedImageMagic = 0;
 
 /* USER CODE BEGIN PFP */
 
@@ -124,163 +94,116 @@ int main(void)
   MX_USART3_UART_Init();
 
   /* Infinite loop */
+    OTA_MainState = OTA_STATE_IDLE;
   while (1)
   {
     // led blinking to indicate bootloader is running
     HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
-    HAL_Delay(5000);
-
-    OTA_Flag_Check();
-
-    if (OTA_Flag == 1)
+    HAL_Delay(1000);
+    HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Bootloader is running\r\n", 23);
+    
+    switch (OTA_MainState)
     {
-      OTA_Process_UART();
+    case OTA_STATE_IDLE:
+        /* code */
+        if (OTA_Flag_Check() == 1)
+        {
+            OTA_MainState = OTA_STATE_PROCESS_HEADER;
+            HAL_UART_Transmit_IT(&huart3, (uint8_t *)"OTA update is requested\r\n", 24);
+        }
+        else
+        {
+            // jump to application
+            HAL_UART_Transmit_IT(&huart3, (uint8_t *)"No OTA update requested. Jumping to application\r\n", 50);
+            JumpToApplication(APP_ADDRESS);
+        }
+        break;
+    case OTA_STATE_PROCESS_HEADER:
+        /* code */
+        OTA_Prcocess_Header();
+        if(Header_Received == true && ValidFirmwareImage == true)
+        {
+            HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Valid firmware image header received. Starting firmware update\r\n", 70);
+            OTA_MainState = OTA_STATE_PROCESS_FIRMWARE;
+            
+        }
+        else
+        {
+            HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Invalid firmware image header received. Aborting OTA update\r\n", 66);
+            OTA_MainState = OTA_STATE_ERROR;
+        }
+        break;
+
+    case OTA_STATE_PROCESS_FIRMWARE:
+        /* code */
+        if(DataReceived!=RX_COMPLETE)
+        {
+            if(chunkReceived == true)
+            {
+                if(Flash_Erase_Data() == HAL_OK)
+                {
+                    Flash_Write_Data();
+                    HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Firmware chunk received and written to flash\r\n", 50);
+                    chunkReceived = false;
+                }
+                else
+                {
+                    HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Error erasing flash sector. Aborting OTA update\r\n", 55);
+                    OTA_MainState = OTA_STATE_ERROR;
+                }
+                
+            }
+        }
+        else
+        {
+            HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Firmware image received completely. Verifying CRC\r\n", 55);
+            OTA_MainState = OTA_STATE_VERIFY;
+        }
+        break;
+    case OTA_STATE_VERIFY:
+        /* code */
+        //if crc check is successful, jump to application
+        if(Bootloader_CrcCheck() == 1U)
+        {
+            HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Firmware image verified successfully. Jumping to application\r\n", 65);
+            OTA_MainState = OTA_STATE_JUMP_TO_APP;
+        }
+        else
+        {
+            HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Firmware image verification failed. Aborting OTA update\r\n", 60);
+            OTA_MainState = OTA_STATE_ERROR;
+        }
+        
+
+        break;
+        case OTA_STATE_JUMP_TO_APP:
+        /* code */
+        HAL_UART_Transmit_IT(&huart3, (uint8_t *)"OTA update completed. Jumping to application\r\n", 45);
+        JumpToApplication(APP_ADDRESS);
+
+        break;
+    case OTA_STATE_ERROR:
+        /* code */
+        break;
+    
+    default:
+        break;
     }
-    else
-    {
-      // Jump to Application
-      JumpToApplication(APP_ADDRESS);
-    }
+    
+
+}
+    
+   
   }
 }
 
-/* Read OTA flag from header area in flash. */
-void OTA_Flag_Check(void)
-{
-  /* Read the OTA flag from the application header*/
-  uint8_t *otaFlag = (uint8_t *)APP_HEADER_ADDR;
-  //copy the OTA flag value to the global variable
-  OTA_Flag = (*(uint32_t *)otaFlag);
-}
+/* USER CODE BEGIN 2 */
+/* Add any custom user functions in Bootloder.c */
+/* USER CODE END 2 */
 
-/* Handle UART reception: header first, then chunks, write to flash and verify CRC.
-Roll back not yet implemeted  */
-static void OTA_Process_UART(void)
-{
-  /* If header not yet received, read the header over UART */
-  if (Header_Received == false)
-  {
-    if (HAL_UART_Receive(&huart3, Header_Buffer, HEADER_SIZE, 5000) == HAL_OK)
-    {
-      uint32_t *ph = (uint32_t *)Header_Buffer;
-      ReceivedImageMagic = ph[0];
-      ReceivedImageSize = ph[1];
-      ReceivedImageCrc = ph[2];
+/* USER CODE BEGIN 4 */
 
-      /* Basic integrity check */
-      if ((ReceivedImageSize > 0) && (ReceivedImageSize < 0x01000000))
-      {
-        Header_Received = true;
-        ValidFirmwareImage = true;
-        RemainingBytes = ReceivedImageSize;
-        CurrentFlashAddress = APP_ADDRESS;
-        Flash_Erase_Data();
-      }
-      else
-      {
-        Header_Received = false;
-        ValidFirmwareImage = false;
-        return;
-      }
-    }
-    else
-    {
-      /* failed to receive header */
-      return;
-    }
-  }
-
-  /* If we have a valid image, receive chunks and write to flash */
-  if (ValidFirmwareImage)
-  {
-    while (RemainingBytes != 0)
-    {
-      CurrentChunkSize = (RemainingBytes > CHUNK_SIZE) ? CHUNK_SIZE : RemainingBytes;
-
-      if (HAL_UART_Receive(&huart3, RX_Buffer, CurrentChunkSize, 2000) == HAL_OK)
-      {
-        RemainingBytes -= CurrentChunkSize;
-        Flash_Write_Data();
-      }
-      else
-      {
-        /* receive error - abort */
-        Header_Received = false;
-        ValidFirmwareImage = false;
-        return;
-      }
-    }
-
-    /* verify CRC */
-    if (Bootloader_CrcCheck() == 1)
-    {
-      HAL_UART_Transmit(&huart3, (uint8_t *)"Application firmware valid", 24, 100);
-      /* Do not clear OTA flag here; application will confirm and clear it. */
-      JumpToApplication(APP_ADDRESS);
-    }
-    else
-    {
-      /* CRC failed */
-      Header_Received = false;
-      ValidFirmwareImage = false;
-    }
-  }
-}
-
-static uint8_t Flash_Erase_Data(void)
-{
-  FLASH_EraseInitTypeDef erase_init_parm;
-  static uint32_t sector_error;
-
-  erase_init_parm.Sector = FLASH_SECTOR_3;
-  erase_init_parm.TypeErase = FLASH_TYPEERASE_SECTORS;
-  erase_init_parm.VoltageRange = FLASH_VOLTAGE_RANGE_3;
-  erase_init_parm.NbSectors = 2; // how many sectors to erase
-  HAL_FLASH_Unlock();
-  if (HAL_FLASHEx_Erase(&erase_init_parm, &sector_error) != HAL_OK)
-  {
-    return HAL_FLASH_GetError();
-  }
-  return 1;
-}
-
-static uint8_t Flash_Write_Data(void)
-{
-  for (uint32_t i = 0; i < CurrentChunkSize; i++)
-  {
-    HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, CurrentFlashAddress++, RX_Buffer[i]);
-  }
-  return 1;
-}
-
-void JumpToApplication(uint32_t addr)
-{
-  uint32_t JumpAddress = *(uint32_t *)(addr + 0x04);
-  pFunction Jump = (pFunction)JumpAddress;
-
-  HAL_RCC_DeInit();
-  HAL_DeInit();
-  SysTick->CTRL = 0;
-  SysTick->LOAD = 0;
-  SysTick->VAL = 0;
-
-  SCB->VTOR = addr;
-  __set_MSP(*(uint32_t *)addr);
-  Jump();
-}
-
-/* Bootloader_HeaderCheck removed - header parsing moved to OTA_Process_UART() */
-
-uint8_t Bootloader_CrcCheck(void)
-{
-  if (ReceivedImageSize == 0)
-    return 0;
-
-  uint32_t addr = APP_ADDRESS;
-  uint32_t wordCount = (ReceivedImageSize + 3) / 4;
-  uint32_t crc32_val = HAL_CRC_Calculate(&hcrc, (uint32_t *)addr, wordCount);
-  return (crc32_val == ReceivedImageCrc) ? 1 : 0;
-}
+/* USER CODE END 4 */
 
 /**
   * @brief System Clock Configuration

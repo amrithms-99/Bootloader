@@ -1,0 +1,166 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : Bootloder.c
+  * @brief          : Bootloader helper functions.
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+#include "Bootloder.h"
+#include "App_Header.h"
+#include <string.h>
+
+/* Global variables used by the bootloader logic */
+uint8_t Header_Buffer[HEADER_SIZE];
+bool Header_Received = false;
+uint8_t RX_Buffer[CHUNK_SIZE];
+static bool ValidFirmwareImage = false;
+app_header_t App_Header;
+uint32_t RemainingBytes = 0;
+uint32_t CurrentChunkSize = 0;
+static uint32_t CurrentFlashAddress = APP_ADDRESS;
+static uint32_t OTA_Flag = 0;
+typedef void (*pFunction)(void);
+
+/* Parsed header fields (from UART header appended to image) */
+static uint32_t ReceivedImageSize = 0;
+static uint32_t ReceivedImageCrc = 0;
+static uint32_t ReceivedImageMagic = 0;
+static uint8_t DataReceived;
+
+static uint8_t Flash_Erase_Data(void);
+static uint8_t Flash_Write_Data(void);
+
+
+bool OTA_Flag_Check(void)
+{
+  
+  OTA_Flag = app_header_t.OTA_Flag;
+  OTA_Status = app_header_t.OTA_Status;
+  return (OTA_Flag == 1);
+}
+
+void OTA_Prcocess_Header(void)
+{
+  if (Header_Received == false)
+  {
+    if (HAL_UART_Receive(&huart3, Header_Buffer, HEADER_SIZE, 5000) == HAL_OK)
+    {
+      uint32_t *ph = (uint32_t *)Header_Buffer;
+      ReceivedImageMagic = ph[0];
+      ReceivedImageSize = ph[1];
+      ReceivedImageCrc = ph[2];
+
+      if ((ReceivedImageSize > 0U) && (ReceivedImageSize < 0x01000000U))
+      {
+        //start UART interrupt receive for the firmware image
+        Header_Received = true;
+        ValidFirmwareImage = true;
+        RemainingBytes = ReceivedImageSize;
+        CurrentFlashAddress = APP_ADDRESS;
+        HAL_UART_Receive_IT(&huart3, RX_Buffer, CHUNK_SIZE);
+        
+      }
+      else
+      {
+        Header_Received = false;
+        ValidFirmwareImage = false;
+      }
+    }
+    else
+    {
+      return;
+    }
+  }
+
+  
+}
+
+
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    //recieve operation is complete. Process the received data
+  if (huart->Instance == USART3)
+  {
+    if(Header_Received == true)
+    {
+        if(RemainingBytes != 0U)
+        {
+            CurrentChunkSize = (RemainingBytes > CHUNK_SIZE) ? CHUNK_SIZE : RemainingBytes;
+            RemainingBytes = RemainingBytes - CurrentChunkSize;
+            chunkReceived = true;
+            //start next receive operation
+            HAL_UART_Receive_IT(&huart3, RX_Buffer, CurrentChunkSize);
+        }
+        else
+        {
+            DataReceived = RX_COMPLETE;
+        }
+
+    }
+    
+  }
+}
+
+static uint8_t Flash_Erase_Data(void)
+{
+  FLASH_EraseInitTypeDef erase_init_parm;
+  static uint32_t sector_error;
+
+  erase_init_parm.Sector = FLASH_SECTOR_3;
+  erase_init_parm.TypeErase = FLASH_TYPEERASE_SECTORS;
+  erase_init_parm.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+  erase_init_parm.NbSectors = 2;
+
+  HAL_FLASH_Unlock();
+  if (HAL_FLASHEx_Erase(&erase_init_parm, &sector_error) != HAL_OK)
+  {
+    return HAL_FLASH_GetError();
+  }
+  else
+  {
+    return HAL_OK;
+  }
+
+  
+}
+
+static uint8_t Flash_Write_Data(void)
+{
+  for (uint32_t i = 0U; i < CurrentChunkSize; i++)
+  {
+    HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, CurrentFlashAddress++, RX_Buffer[i]);
+  }
+  return 1U;
+}
+
+void JumpToApplication(uint32_t addr)
+{
+  uint32_t JumpAddress = *(uint32_t *)(addr + 0x04);
+  pFunction Jump = (pFunction)JumpAddress;
+
+  HAL_RCC_DeInit();
+  HAL_DeInit();
+  SysTick->CTRL = 0U;
+  SysTick->LOAD = 0U;
+  SysTick->VAL = 0U;
+
+  SCB->VTOR = addr;
+  __set_MSP(*(uint32_t *)addr);
+  Jump();
+}
+
+uint8_t Bootloader_CrcCheck(void)
+{
+  if (ReceivedImageSize == 0U)
+  {
+    return 0U;
+  }
+
+  uint32_t addr = APP_ADDRESS;
+  uint32_t wordCount = (ReceivedImageSize + 3U) / 4U;
+  uint32_t crc32_val = HAL_CRC_Calculate(&hcrc, (uint32_t *)addr, wordCount);
+  return (crc32_val == ReceivedImageCrc) ? 1U : 0U;
+}
