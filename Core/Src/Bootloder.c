@@ -9,102 +9,136 @@
 
 #include "Bootloder.h"
 #include "App_Header.h"
+#include "main.h"
 #include <string.h>
 
 /* Global variables used by the bootloader logic */
-uint8_t Header_Buffer[HEADER_SIZE];
-bool Header_Received = false;
+
+volatile bool Header_Received = false;
 uint8_t RX_Buffer[CHUNK_SIZE];
-static bool ValidFirmwareImage = false;
+
 app_header_t App_Header;
 uint32_t RemainingBytes = 0;
 uint32_t CurrentChunkSize = 0;
 static uint32_t CurrentFlashAddress = APP_ADDRESS;
 static uint32_t OTA_Flag = 0;
+volatile bool chunkReceived = false;
 typedef void (*pFunction)(void);
 
 /* Parsed header fields (from UART header appended to image) */
 static uint32_t ReceivedImageSize = 0;
 static uint32_t ReceivedImageCrc = 0;
 static uint32_t ReceivedImageMagic = 0;
-static uint8_t DataReceived;
+uint8_t DataReceived;
+uint8_t Header_Buffer[HEADER_SIZE];
+uint8_t DataReceived;
+bool ValidFirmwareImage;
 
-static uint8_t Flash_Erase_Data(void);
+uint8_t Flash_Erase_Data(void);
 static uint8_t Flash_Write_Data(void);
 
+void Bootloader_Init(void)
+{
+    Header_Received = false;
+    ValidFirmwareImage = false;
+    RemainingBytes = 0U;
+    CurrentChunkSize = 0U;
+    CurrentFlashAddress = APP_ADDRESS;
+    OTA_Flag = 0U;
+    ReceivedImageSize = 0U;
+    ReceivedImageCrc = 0U;
+    ReceivedImageMagic = 0U;
+    DataReceived = RX_INPROGRESS;
+    chunkReceived = false;
+    memset(Header_Buffer, 0, sizeof(Header_Buffer));
+    memset(RX_Buffer, 0, sizeof(RX_Buffer));
+    memset(&App_Header, 0, sizeof(App_Header));
+}
 
 bool OTA_Flag_Check(void)
 {
-  
-  OTA_Flag = app_header_t.OTA_Flag;
-  OTA_Status = app_header_t.OTA_Status;
-  return (OTA_Flag == 1);
+    memcpy(&App_Header, (void *)APP_HEADER_ADDR, sizeof(app_header_t));
+    OTA_Flag = App_Header.OTA_Flag;
+    return (OTA_Flag == 1U);
 }
 
 void OTA_Prcocess_Header(void)
 {
-  if (Header_Received == false)
-  {
-    if (HAL_UART_Receive(&huart3, Header_Buffer, HEADER_SIZE, 5000) == HAL_OK)
-    {
-      uint32_t *ph = (uint32_t *)Header_Buffer;
-      ReceivedImageMagic = ph[0];
-      ReceivedImageSize = ph[1];
-      ReceivedImageCrc = ph[2];
 
-      if ((ReceivedImageSize > 0U) && (ReceivedImageSize < 0x01000000U))
-      {
-        //start UART interrupt receive for the firmware image
-        Header_Received = true;
-        ValidFirmwareImage = true;
-        RemainingBytes = ReceivedImageSize;
-        CurrentFlashAddress = APP_ADDRESS;
-        HAL_UART_Receive_IT(&huart3, RX_Buffer, CHUNK_SIZE);
-        
-      }
-      else
-      {
-        Header_Received = false;
-        ValidFirmwareImage = false;
-      }
-    }
-    else
-    {
-      return;
-    }
-  }
+	if(Header_Received == true)
+	{
+		uint32_t *tempHeaderBuffer = (uint32_t *)Header_Buffer;
+		App_Header.MagicNumber = tempHeaderBuffer[0];
+		App_Header.ImageSize = tempHeaderBuffer[1];
+		App_Header.CRCVal = tempHeaderBuffer[2];
+		if(((App_Header.ImageSize > 0U) && (App_Header.ImageSize < 0x01000000U)) && (App_Header.MagicNumber == APP_HEADER_MAGIC_NUM))
+		{
+			Header_Received = true;
+			RemainingBytes = App_Header.ImageSize;
+			ValidFirmwareImage = true;
+		}
+		else
+		{
+			ValidFirmwareImage=false;
 
-  
+		}
+	}
+
 }
 
+uint8_t OTA_Process_Firmware(void)
+{
+    if (RemainingBytes == 0U)
+    {
+        return OK;
+    }
 
+    if (!chunkReceived)
+    {
+        return NOT_OK;
+    }
+
+    chunkReceived = false;
+    Flash_Write_Data();
+
+    RemainingBytes -= CurrentChunkSize;
+
+    if (RemainingBytes > 0)
+    {
+        CurrentChunkSize = (RemainingBytes > CHUNK_SIZE) ?
+                           CHUNK_SIZE : RemainingBytes;
+
+        if (HAL_UART_Receive_IT(&huart3,
+                                RX_Buffer,
+                                CurrentChunkSize) != HAL_OK)
+        {
+            return NOT_OK;
+        }
+    }
+
+    return (RemainingBytes == 0) ? OK : NOT_OK;
+}
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     //recieve operation is complete. Process the received data
   if (huart->Instance == USART3)
   {
-    if(Header_Received == true)
+	  if(OTA_MainState == OTA_STATE_PROCESS_HEADER)
+	  {
+		  Header_Received = true;
+
+	  }
+    if((OTA_MainState == OTA_STATE_PROCESS_FIRMWARE)&&(chunkReceived == false))
     {
-        if(RemainingBytes != 0U)
-        {
-            CurrentChunkSize = (RemainingBytes > CHUNK_SIZE) ? CHUNK_SIZE : RemainingBytes;
-            RemainingBytes = RemainingBytes - CurrentChunkSize;
-            chunkReceived = true;
-            //start next receive operation
-            HAL_UART_Receive_IT(&huart3, RX_Buffer, CurrentChunkSize);
-        }
-        else
-        {
-            DataReceived = RX_COMPLETE;
-        }
+        chunkReceived = true;
+       
 
     }
     
   }
 }
-
-static uint8_t Flash_Erase_Data(void)
+ uint8_t Flash_Erase_Data(void)
 {
   FLASH_EraseInitTypeDef erase_init_parm;
   static uint32_t sector_error;
@@ -154,13 +188,16 @@ void JumpToApplication(uint32_t addr)
 
 uint8_t Bootloader_CrcCheck(void)
 {
-  if (ReceivedImageSize == 0U)
-  {
-    return 0U;
-  }
-
   uint32_t addr = APP_ADDRESS;
-  uint32_t wordCount = (ReceivedImageSize + 3U) / 4U;
+  uint32_t wordCount = (App_Header.ImageSize + 3U) / 4U;
   uint32_t crc32_val = HAL_CRC_Calculate(&hcrc, (uint32_t *)addr, wordCount);
-  return (crc32_val == ReceivedImageCrc) ? 1U : 0U;
+  if(crc32_val == App_Header.CRCVal)
+  {
+	  return 1;
+  }
+  else
+  {
+	  return 0;
+  }
 }
+

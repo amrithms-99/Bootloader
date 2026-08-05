@@ -1,0 +1,9 @@
+../Core/Src/Bootloder.c:40:6:Bootloader_Init	8	static
+../Core/Src/Bootloder.c:58:6:OTA_Flag_Check	8	static
+../Core/Src/Bootloder.c:65:6:OTA_Prcocess_Header	16	static
+../Core/Src/Bootloder.c:89:9:OTA_Process_Firmware	8	static
+../Core/Src/Bootloder.c:122:6:HAL_UART_RxCpltCallback	16	static
+../Core/Src/Bootloder.c:141:10:Flash_Erase_Data	32	static
+../Core/Src/Bootloder.c:164:16:Flash_Write_Data	24	static
+../Core/Src/Bootloder.c:173:6:JumpToApplication	32	static,ignoring_inline_asm
+../Core/Src/Bootloder.c:189:9:Bootloader_CrcCheck	24	static

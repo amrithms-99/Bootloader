@@ -22,17 +22,26 @@ extern "C" {
 #define APP_ADDRESS      0x8018000U
 #define CHUNK_SIZE       256U
 //STATE MACHINE VARIABLES
-
+#define OK 1
+#define NOT_OK 0
 
 extern CRC_HandleTypeDef hcrc;
 extern UART_HandleTypeDef huart3;
 extern OTA_State_e OTA_MainState;
+extern volatile bool chunkReceived;
+extern uint8_t Header_Buffer[HEADER_SIZE];
+extern uint8_t DataReceived;
+extern bool ValidFirmwareImage;
 
+void Bootloader_Init(void);
 bool OTA_Flag_Check(void);
 void OTA_Prcocess_Header(void);
+uint8_t OTA_Process_Firmware(void);
 void JumpToApplication(uint32_t addr);
 uint8_t Bootloader_CrcCheck(void);
 uint8_t OTA_Process_FirmwareImage(void);
+extern uint8_t Flash_Erase_Data(void);
+
 
 
 typedef enum {

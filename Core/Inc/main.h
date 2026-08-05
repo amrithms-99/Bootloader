@@ -27,6 +27,8 @@ extern "C" {
 #endif
 
 /* Includes ------------------------------------------------------------------*/
+/* Ensure no conflicting CRC macro is present before CMSIS/HAL headers */
+
 #include "stm32f7xx_hal.h"
 #include "stm32f7xx_hal_flash.h"
 #include "stm32f7xx_hal_uart.h"

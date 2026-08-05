@@ -48,7 +48,7 @@
 
 CRC_HandleTypeDef hcrc;
 UART_HandleTypeDef huart3;
-
+OTA_State_e OTA_MainState;
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -93,13 +93,17 @@ int main(void)
   MX_CRC_Init();
   MX_USART3_UART_Init();
 
+  Bootloader_Init();
+
   /* Infinite loop */
     OTA_MainState = OTA_STATE_IDLE;
+    app_header_t *header = (app_header_t *)APP_HEADER_ADDR;
   while (1)
   {
     // led blinking to indicate bootloader is running
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
-    HAL_Delay(1000);
+   // HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
+   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
+    HAL_Delay(5000);
     HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Bootloader is running\r\n", 23);
     
     switch (OTA_MainState)
@@ -109,23 +113,36 @@ int main(void)
         if (OTA_Flag_Check() == 1)
         {
             OTA_MainState = OTA_STATE_PROCESS_HEADER;
+            HAL_UART_Receive_IT(&huart3, Header_Buffer, HEADER_SIZE);
             HAL_UART_Transmit_IT(&huart3, (uint8_t *)"OTA update is requested\r\n", 24);
         }
         else
         {
             // jump to application
             HAL_UART_Transmit_IT(&huart3, (uint8_t *)"No OTA update requested. Jumping to application\r\n", 50);
+           // HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 0);
             JumpToApplication(APP_ADDRESS);
         }
         break;
     case OTA_STATE_PROCESS_HEADER:
         /* code */
-        OTA_Prcocess_Header();
-        if(Header_Received == true && ValidFirmwareImage == true)
+        if(ValidFirmwareImage == true)
+
         {
             HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Valid firmware image header received. Starting firmware update\r\n", 70);
-            OTA_MainState = OTA_STATE_PROCESS_FIRMWARE;
+            //erase flash sectors before writing the firmware image
+            if(Flash_Erase_Data() == HAL_OK)
+            {
+                HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Flash sectors erased successfully\r\n", 36);
+                OTA_MainState = OTA_STATE_PROCESS_FIRMWARE;
+            }
+            else
+            {
+                HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Error erasing flash sector. Aborting OTA update\r\n", 55);
+                OTA_MainState = OTA_STATE_ERROR;
+            }
             
+
         }
         else
         {
@@ -136,25 +153,8 @@ int main(void)
 
     case OTA_STATE_PROCESS_FIRMWARE:
         /* code */
-        if(DataReceived!=RX_COMPLETE)
-        {
-            if(chunkReceived == true)
-            {
-                if(Flash_Erase_Data() == HAL_OK)
-                {
-                    Flash_Write_Data();
-                    HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Firmware chunk received and written to flash\r\n", 50);
-                    chunkReceived = false;
-                }
-                else
-                {
-                    HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Error erasing flash sector. Aborting OTA update\r\n", 55);
-                    OTA_MainState = OTA_STATE_ERROR;
-                }
-                
-            }
-        }
-        else
+
+        if(OTA_Process_Firmware()==1)
         {
             HAL_UART_Transmit_IT(&huart3, (uint8_t *)"Firmware image received completely. Verifying CRC\r\n", 55);
             OTA_MainState = OTA_STATE_VERIFY;
@@ -188,14 +188,14 @@ int main(void)
     
     default:
         break;
-    }
+    	}
     
 
-}
+  	  }
     
    
-  }
 }
+
 
 /* USER CODE BEGIN 2 */
 /* Add any custom user functions in Bootloder.c */
